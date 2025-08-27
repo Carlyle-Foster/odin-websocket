@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+    <head>
+
+    </head>
+    <body>
+        <p>Websockets!</p>
+        <input id="message" placeholder="your message here!">
+        <button onclick="send_message()">Send Message</button>
+        <p id="response"></p>
+    </body>
+    <script>
+        let ws = new WebSocket("ws://127.0.0.1:8783");
+        
+        response = document.getElementById("response");
+        ws.onmessage = (msg) => {
+            console.log(msg.data)
+            response.textContent = `Response: ${msg.data}`;
+        }
+        ws.onclose = (event) => {
+            console.log("WebSocket closed.");
+            console.log("Code:", event.code);
+            console.log("Reason:", event.reason);
+            console.log("Was clean?:", event.wasClean);
+        };
+        function send_message() {
+            let message = document.getElementById("message").value;
+            ws.send(message);
+        }
+    </script>
+</html>
