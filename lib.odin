@@ -17,21 +17,24 @@ import "core:crypto/legacy/sha1"
 import "core:encoding/base64"
 
 // the best data structure
-Pile :: struct(N: int) {
-    data: [N]byte,
+Pile :: struct {
+    data: []byte,
     len: int,
 }
+pile_create :: proc(buf: []byte) -> Pile {
+    return Pile{data=buf}
+}
 pile_push :: proc { pile_push_back, pile_push_back_elems }
-pile_push_back :: proc(p: ^$P/Pile, bite: byte) {
-    p.data[p.len] = bite
+pile_push_back :: proc(p: ^Pile, bite: byte) {
+    #no_bounds_check p.data[p.len] = bite
     p.len += 1
 }
-pile_push_back_elems :: proc(p: ^$P/Pile, bytes: []byte) {
+pile_push_back_elems :: proc(p: ^Pile, bytes: []byte) {
     copy(p.data[p.len:], bytes)
     p.len += len(bytes)
 }
-pile_as_slice :: proc(p: ^$P/Pile) -> []byte {
-    return p.data[:p.len]
+pile_as_slice :: proc(p: Pile) -> []byte {
+    #no_bounds_check return p.data[:p.len]
 }
 
 Websocket :: net.TCP_Socket
@@ -144,9 +147,11 @@ decode_frame :: proc(data: []byte) -> (frame: Frame, bytes_parsed: int, err: Err
     return
 }
 
-send_frame :: proc(ws: Websocket, oc: Opcode, payload: []byte, final := true) -> (err: Error) {
-    MAX_INLINE_PAYLOAD_SIZE :: 1000
-    header: Pile(14 + MAX_INLINE_PAYLOAD_SIZE)
+create_frame :: proc(buf: []byte, oc: Opcode, payload: []byte, final := true) -> (packet_1: []byte, packet_2: Maybe([]byte)) {
+    MAX_LENGTH_OF_HEADER :: 14
+    assert(len(buf) >= MAX_LENGTH_OF_HEADER)
+    
+    header := pile_create(buf)
     pile_push(&header, u8(oc) | (transmute(u8)final << 7))
 
     mask_bit := u8(0)
@@ -173,135 +178,20 @@ send_frame :: proc(ws: Websocket, oc: Opcode, payload: []byte, final := true) ->
         pile_push(&header, mask[:])
     }
 
-    if payload_len <= MAX_INLINE_PAYLOAD_SIZE {
+    if payload_len <= len(buf) - header.len {
         pile_push(&header, payload)
-        frame_bytes_sent, frame_send_err := net.send(ws, pile_as_slice(&header))
-        if frame_send_err != nil {
-            log.debug("when sending frame received Error:", frame_send_err)
-            if frame_send_err == net.TCP_Send_Error.Connection_Closed {
-                err = .Connection_Closed
-            } else {
-                err = .Failed_To_Send
-            }
-        }
-        if frame_bytes_sent < header.len {
-            err = .Failed_To_Send
-        }
-        log.infof("sent %v bytes of frame", frame_bytes_sent)
+        packet_1 = pile_as_slice(header)
     } else {
-        header_bytes_sent, header_send_err := net.send(ws, pile_as_slice(&header))
-        if header_send_err != nil {
-            log.debug("when sending frame received Error:", header_send_err)
-            if header_send_err == net.TCP_Send_Error.Connection_Closed {
-                err = .Connection_Closed
-            } else {
-                err = .Failed_To_Send
-            }
-        }
-        if header_bytes_sent < header.len {
-            err = .Failed_To_Send
-        }
-        log.infof("sent %v bytes of header", header_bytes_sent)
-    
-        payload_bytes_sent, payload_send_err := net.send(ws, payload)
-        if payload_send_err != nil {
-            log.debug("when sending frame received Error:", payload_send_err)
-            if payload_send_err == net.TCP_Send_Error.Connection_Closed {
-                err = .Connection_Closed
-            } else {
-                err = .Failed_To_Send
-            }
-        }
-        if payload_bytes_sent < header.len {
-            err = .Failed_To_Send
-        }
-        log.infof("sent %v bytes of payload", payload_bytes_sent)
+        packet_1 = pile_as_slice(header)
+        packet_2 = payload
     }
     return
 }
 
-// Decoder_Ring :: struct {
-//     _frame: Frame,
-//     _interjected_control_frame: Frame,
-//     _trailing_space: int,
-//     _trailing_space_end: Maybe(rawptr),
-// }
-
-// get_interjected_control_frame :: proc(decoder: ^Decoder_Ring) -> Frame {
-//     assert(decoder._interjected_control_frame.payload != nil)
-
-//     frame := decoder._interjected_control_frame
-//     decoder._interjected_control_frame = {}
-    
-//     return frame
-// }
-
-// decode_message :: proc(decoder: ^Decoder_Ring, data: []byte) -> (frame: Frame, bytes_parsed: int, err: Error) {
-//     remaining := data
-
-//     using decoder
-
-//     if _frame.is_final || _frame.payload == nil {
-//         _frame = decode_frame(&remaining) or_return
-
-//         bytes_parsed = len(data) - len(remaining)
-//     }
-
-//     for !_frame.is_final {
-//         log.info("decoding continuation frame")
-
-//         fragment := decode_frame(&remaining) or_return
-
-//         bytes_parsed = len(data) - len(remaining)
-
-//         switch fragment.opcode {
-//         case .Continuation:
-//             dst := &raw_data(_frame.payload)[len(_frame.payload)]
-//             src := raw_data(fragment.payload)
-//             mem.copy(dst, src, len(fragment.payload))
-//             _frame.payload = slice.from_ptr(raw_data(_frame.payload), len(_frame.payload) + len(fragment.payload))
-//             _trailing_space += int(_frame.header_len)
-
-//             _frame.is_final ||= fragment.is_final
-//         case .Close, .Ping, .Pong:
-//             _interjected_control_frame = fragment
-//             err = .Interjected_Control_frame
-//             return
-//         case .Binary, .Text:
-//             err = .Missing_Contination_Frame
-//             return
-//         }
-//     }
-
-//     if len(remaining) == 0 && _trailing_space > 0 {
-//         _trailing_space_end = slice.last_ptr(data)
-//     } else {
-//         _trailing_space_end = nil
-//     }
-
-//     if _frame.opcode == .Text && !utf8.valid_string(string(_frame.payload)) {
-//         err = .Invalid_Utf8
-//         return
-//     }
-    
-//     frame = _frame
-//     bytes_parsed = len(data) - len(remaining)
-//     return
-// }
-
-// get_compacted_savings :: proc(decoder: ^Decoder_Ring, parsed_slice: []byte) -> (savings: int) {
-//     if decoder._trailing_space_end == slice.last_ptr(parsed_slice) {
-//         savings = decoder._trailing_space
-
-//         decoder._trailing_space = 0
-//         decoder._trailing_space_end = nil
-//     }
-//     return
-// }
-
 parse_http_the_stupid_way :: proc(request: string) -> (response: string, ok: bool) {
     headers, _, _ := strings.partition(request, "\r\n\r\n")
     if len(headers) == len(request) { // the request is incomplete (no \r\n\r\n), so try again later
+        //TODO: make this distinguishable from an error
         return
     }
     for line in strings.split_lines_iterator(&headers) {

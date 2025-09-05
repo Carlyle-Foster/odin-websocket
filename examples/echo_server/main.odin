@@ -4,20 +4,19 @@ import "core:log"
 import "core:fmt"
 import "core:mem"
 import "core:slice"
-import "core:strconv"
 
-import "core:os/os2"
 import "core:net"
 import "core:math/rand"
 import "core:unicode/utf8"
 
 import ws "../../../odin-websockets"
+import "../../selector"
 
-import "core:sys/linux"
+TCP_Socket :: net.TCP_Socket
+Endpoint :: net.Endpoint
+Network_Error :: net.Network_Error
 
 SERVER_ID :: 0
-
-g_epoll: linux.Fd
 
 Connection_Status :: enum {
     Handshaking,
@@ -37,6 +36,53 @@ Client :: struct {
 }
 Source_ID :: distinct u64
 
+g_selector: selector.Selector
+g_clients: map[Source_ID]Client
+
+main :: proc() {
+    context.logger = log.create_console_logger()
+    defer log.destroy_console_logger(context.logger)
+
+    selector_init_err := selector.init(&g_selector)
+    assert(selector_init_err == nil, fmt.aprint(selector_init_err))
+
+    server_socket, listen_err := net.listen_tcp({ address=net.IP4_Loopback, port=8783})
+    assert(listen_err == nil, fmt.aprint(listen_err))
+
+    register_err := selector.register_socket(&g_selector, net.Socket(server_socket), { .Readable }, SERVER_ID)
+    assert(register_err == nil, fmt.aprint(register_err))
+
+    g_clients = make(type_of(g_clients))
+    defer delete(g_clients)
+    
+    events: [128]selector.Event
+    for {
+        event_count, select_err := selector.select(&g_selector, events[:], nil)
+        assert(select_err == nil, fmt.aprint(select_err))
+
+        for event in events[:event_count] {
+            id := Source_ID(event.id)
+            interests := event.interests
+
+            if id == SERVER_ID {
+                client_accept(server_socket)
+                continue
+            }
+
+            client, client_exists := &g_clients[id]
+            
+            assert(client_exists)
+
+            switch client.status {
+            case .Handshaking:
+                client_handshake(client)
+            case .Connected:
+                client_handle(client)
+            }
+        }
+    }
+}
+
 client_create :: proc(socket: net.TCP_Socket, allocator := context.allocator) -> ^Client {
     id: Source_ID
     for {
@@ -52,136 +98,60 @@ client_create :: proc(socket: net.TCP_Socket, allocator := context.allocator) ->
     return client
 }
 
-g_clients: map[Source_ID]Client
+client_accept :: proc(server: TCP_Socket) {
+    client_socket, endpoint, accept_err := net.accept_tcp(server)
 
-main :: proc() {
-    context.logger = log.create_console_logger()
-    defer log.destroy_console_logger(context.logger)
-
-    server_endpoint, provided_endpoint_ok := net.parse_endpoint(os2.args[1])
-    assert(provided_endpoint_ok)
-
-    server_socket, listen_err := net.listen_tcp(server_endpoint)
-    assert(listen_err == nil)
-
-    g_clients = make(type_of(g_clients))
-    defer delete(g_clients)
-
-    epoll_create_err: linux.Errno
-    g_epoll, epoll_create_err = linux.epoll_create1(nil)
-    assert(epoll_create_err == nil)
-
-    accept_ready := linux.EPoll_Event {
-        events = { .IN, .ET },
-        data = { u64=SERVER_ID },
-    }
-    linux.epoll_ctl(g_epoll, .ADD, linux.Fd(server_socket), &accept_ready)
-
-    for {
-        epoll_events: [128]linux.EPoll_Event
-        event_count, wait_err := linux.epoll_wait(g_epoll, raw_data(epoll_events[:]), len(epoll_events), timeout=-1)
-        assert(wait_err == nil)
-
-        iter: for event in epoll_events[:event_count] {
-            log.info("got id:", Source_ID(event.data.u64))
-
-            if event.data.u64 == SERVER_ID {
-                accept_client(server_socket)
-            } else {
-                client := &g_clients[Source_ID(event.data.u64)]
-
-                assert(client != nil)
-
-                if !handle_client(client) {
-                    drop_client(client)
-                }
-            }
-        }
-    }
-}
-
-accept_client :: proc(server: net.TCP_Socket) -> (ok: bool) {
-    client_socket, client_endpoint, accept_err := net.accept_tcp(server)
     if accept_err != nil {
-        fmt.println("ERROR: failed to accept client\n    Reason =", accept_err)
+        log.info("dropped client when accepting because of Error:", accept_err)
         return
     }
-    set_blocking_err := net.set_blocking(client_socket, should_block=false)
-    assert(set_blocking_err == nil)
 
     client := client_create(client_socket)
 
-    client_sent_data := linux.EPoll_Event {
-        events = { .IN, .ET },
-        data = { u64=u64(client.id) },
-    }
-    linux.epoll_ctl(g_epoll, .ADD, linux.Fd(client.socket), &client_sent_data)
-    log.info("registered client with id:", client.id)
+    selector.register_socket(&g_selector, net.Socket(client_socket), { .Readable }, int(client.id))
 
-    return true
+    log.info("registered client with ID:", client.id)
 }
 
-handle_client :: proc(client: ^Client) -> (ok: bool) {
-    switch client.status {
-    case .Handshaking:
-        return handshake_client(client)
-    case .Connected:
-        return serve_client(client)
-    case:
-        unreachable()
-    }
-}
+client_handshake :: proc(client: ^Client) {
+    bytes_read, recv_err := net.recv_tcp(client.socket, client.receive_buf)
 
-handshake_client :: proc(client: ^Client) -> (ok: bool) {
-    bytes_read, recv_err := net.recv_tcp(client.socket, client.receive_buf[:])
-    if recv_err != nil {
-        fmt.println("ERROR: failed to receive handshake from client\n    Reason =", recv_err)
+    if client_drop_on_error(client, recv_err) {
         return
     }
+
     request := string(client.receive_buf[:bytes_read])
     fmt.print(request)
 
-    response := ws.parse_http_the_stupid_way(request) or_return
+    response, http_ok := ws.parse_http_the_stupid_way(request)
+    //TODO: wait a bit longer if the request was just too short
+    if !http_ok {
+        log.info("ERROR: client sent invalid HTTP")
+        client_drop(client)
+        return
+    }
     defer delete(response)
 
     fmt.print(response)
     bytes_sent, send_err := net.send_tcp(client.socket, transmute([]byte)response)
-    if recv_err != nil {
-        fmt.println("ERROR: failed to send handshake to client\n    Reason =", send_err)
+
+    if client_drop_on_error(client, send_err) {
         return
     }
-    log.infof("sent %v byte handshake client", bytes_sent)
 
     log.info("handshake success")
 
     client.status = .Connected
-
-    return true
 }
 
-serve_client :: proc(client: ^Client) -> (ok: bool) {
-    recv_err: net.Network_Error
-    for recv_err == nil {
-        if client.bytes_read >= len(client.receive_buf) {
-            log.infof("client used too many bytes (%v), so we're dropping them", client.bytes_read)
-            return
-        }
-        bytes_read: int
-        bytes_read, recv_err = net.recv_tcp(client.socket, client.receive_buf[client.bytes_read:])
-        if recv_err == net.TCP_Recv_Error.Interrupted {
-            recv_err = nil
-        }
-        if bytes_read == 0 && recv_err == nil {
-            log.info("the client closed the connection")
-            return
-        }
-        log.info("got here", bytes_read)
-        client.bytes_read += bytes_read
-    }
-    if recv_err != net.TCP_Recv_Error.Timeout { // this is would_block for some reason?
-        fmt.println("ERROR: failed to receive bytes from client\n    Reason =", recv_err)
+client_handle :: proc(client: ^Client) {
+    bytes_read, recv_err := net.recv_tcp(client.socket, client.receive_buf)
+
+    if client_drop_on_error(client, recv_err) {
         return
     }
+
+    client.bytes_read += bytes_read
 
     savings := 0
 
@@ -190,11 +160,11 @@ serve_client :: proc(client: ^Client) -> (ok: bool) {
         frame, bytes_parsed, decode_err := ws.decode_frame(frontier)
         client.bytes_parsed += bytes_parsed
         if decode_err != .None {
-            if decode_err == .Too_Short {
-                ok = true // the only exit
+            if decode_err == .Too_Short { // try again later
                 return
             }
             log.debug(decode_err)
+            client_drop(client)
             return
         }
     
@@ -204,6 +174,7 @@ serve_client :: proc(client: ^Client) -> (ok: bool) {
         fmt.println(string(frame.payload))
     
         if ((int(frame.opcode) & ws.OPCODE_CONTROL_BIT) > 0) && (len(frame.payload) > 125) {
+            client_drop(client)
             return
         }
         
@@ -234,11 +205,13 @@ serve_client :: proc(client: ^Client) -> (ok: bool) {
             }
             else if int(frame.opcode) & ws.OPCODE_CONTROL_BIT == 0 {
                 // the client tried to interject a non-control frame, shut 'em down
+                client_drop(client)
                 return
             }
         }
         if frame.opcode == .Continuation {
             // valid continuation frames shouldn't get to this point
+            client_drop(client)
             return
         }
 
@@ -248,7 +221,7 @@ serve_client :: proc(client: ^Client) -> (ok: bool) {
                 savings += bytes_parsed
             }
             if frame.opcode == .Close {
-                _ = ws.send_frame(ws.Websocket(client.socket), .Close, nil)
+                _, _ = client_send(client, .Close, nil)
                 return
             }
             if frame.opcode == .Pong {
@@ -260,11 +233,13 @@ serve_client :: proc(client: ^Client) -> (ok: bool) {
         }
 
         if frame.opcode == .Text && !utf8.valid_string(string(frame.payload)) {
+            client_drop(client)
             return
         }
     
-        send_err := ws.send_frame(ws.Websocket(client.socket), frame.opcode, frame.payload)
+        _, send_err := client_send(client, frame.opcode, frame.payload)
         if send_err != nil {
+            client_drop(client)
             return
         }
 
@@ -290,9 +265,33 @@ serve_client :: proc(client: ^Client) -> (ok: bool) {
     }
 }
 
-drop_client :: proc(client: ^Client) {
-    linux.epoll_ctl(g_epoll, .DEL, linux.Fd(client.socket), nil)
+client_send :: proc(client: ^Client, oc: ws.Opcode, payload: []byte, final := true) -> (bytes_writ: int, err: Network_Error) {
+    buf: [1024]byte
+    packet_1, packet_2 := ws.create_frame(buf[:], oc, payload, final)
+
+    bytes_writ = net.send_tcp(client.socket, packet_1) or_return
+
+    if second_packet, is_2 := packet_2.([]byte); is_2 {
+        bytes_writ += net.send_tcp(client.socket, second_packet) or_return
+    }
+
+    return
+}
+
+client_drop :: proc(client: ^Client) {
+    selector.deregister_socket(&g_selector, net.Socket(client.socket))
     net.close(client.socket)
 
     g_clients[client.id] = {}
+}
+
+client_drop_on_error :: proc(client: ^Client, err: Network_Error, loc := #caller_location) -> (was_err: bool) {
+    was_err = (err != nil)
+
+    if was_err {
+        log.infof("dropped client %v because of Error: %v", client.id, err, location=loc)
+        client_drop(client)
+    }
+
+    return
 }
