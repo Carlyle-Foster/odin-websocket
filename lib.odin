@@ -74,6 +74,10 @@ Error :: enum {
     Invalid_Opcode,
     Fragmented_Control_Frame,
     Invalid_Utf8,
+    Interjected_Control_Frame,
+    Unexpected_Continuation_Frame,
+    Control_Frame_Payload_Too_Long,
+    Wet_Handshake,
 }
 
 decode_frame :: proc(data: []byte) -> (frame: Frame, bytes_parsed: int, err: Error) {
@@ -188,10 +192,10 @@ create_frame :: proc(buf: []byte, oc: Opcode, payload: []byte, final := true) ->
     return
 }
 
-parse_http_the_stupid_way :: proc(request: string) -> (response: string, ok: bool) {
+parse_http_the_stupid_way :: proc(request: string) -> (response: string, err: Error) {
     headers, _, _ := strings.partition(request, "\r\n\r\n")
     if len(headers) == len(request) { // the request is incomplete (no \r\n\r\n), so try again later
-        //TODO: make this distinguishable from an error
+        err = .Too_Short
         return
     }
     for line in strings.split_lines_iterator(&headers) {
@@ -201,7 +205,7 @@ parse_http_the_stupid_way :: proc(request: string) -> (response: string, ok: boo
             key := strings.trim(value, " \t\r\n")
             
             if len(key) != 24 {
-                log.info("invalid key received, dropping client")
+                err = .Wet_Handshake
                 return
             }
 
@@ -213,7 +217,6 @@ parse_http_the_stupid_way :: proc(request: string) -> (response: string, ok: boo
             )
         }
     }
-    ok = true
     return
 
     useless_transformation :: proc(key: string) -> (accept: string) {

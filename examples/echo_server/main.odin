@@ -35,9 +35,15 @@ Client :: struct {
     bytes_parsed: int,
 }
 
-Error :: union #shared_nil {
+Server_Error :: union #shared_nil {
     net.Network_Error,
     selector.Error,
+}
+
+Client_Error :: union #shared_nil {
+    net.Network_Error,
+    selector.Error,
+    ws.Error,
 }
 
 // *Globals*
@@ -58,7 +64,7 @@ main :: proc() {
     }
 }
 
-run_server :: proc() -> Error {
+run_server :: proc() -> Server_Error {
     selector.init(&g_selector) or_return
 
     address := net.IP4_Loopback
@@ -82,27 +88,31 @@ run_server :: proc() -> Error {
         ) or_return
 
         for event in events[:event_count] {
-            id := Source_ID(event.id)
-
-            if id == SERVER_ID {
-                client_accept(server_socket)
-            } else {
-                client := &g_clients[id]
-
-                switch client.status {
-                case .Handshaking:
-                    client_handshake(client)
-                case .Connected:
-                    client_handle(client)
-                }
-            }
-
+            handle_event(server_socket, event)
         }
     }
 
     delete(g_clients)
 
     return nil
+}
+
+handle_event :: proc(server: net.TCP_Socket, event: selector.Event) {
+    id := Source_ID(event.id)
+
+    if id == SERVER_ID {
+        client_accept(server)
+
+    } else {
+        client := &g_clients[id]
+
+        err := client_handle(client)
+
+        if err != nil {
+            log.infof("dropped client %v because of Error: %v", id, err)
+            client_drop(client)
+        }
+    }
 }
 
 // *Methods of `Client`*
@@ -125,7 +135,7 @@ client_create :: proc(socket: net.TCP_Socket, allocator := context.allocator) ->
 client_accept :: proc(server: net.TCP_Socket) {
     client_socket, endpoint, accept_err := net.accept_tcp(server)
     if accept_err != nil {
-        log.info("dropped client when accepting because of Error:", accept_err)
+        log.info("failed to accept new client because of Error:", accept_err)
         return
     }
     net.set_blocking(client_socket, should_block=false)
@@ -141,33 +151,34 @@ client_accept :: proc(server: net.TCP_Socket) {
     log.info("registered client with ID:", client.id)
 }
 
-client_handshake :: proc(client: ^Client) {
+client_handshake :: proc(client: ^Client) -> Client_Error {
     bytes_read, recv_err := net.recv_tcp(client.socket, client.receive_buf)
-    if client_drop_on_error(client, recv_err) {
-        return
+    if recv_err != nil {
+        return net.Network_Error(recv_err)
     }
+
     request := string(client.receive_buf[:bytes_read])
     fmt.print(request)
 
-    response, http_ok := ws.parse_http_the_stupid_way(request)
-    //TODO: wait a bit longer if the request was just too short
-    if !http_ok {
-        log.info("ERROR: client sent invalid HTTP")
-        client_drop(client)
-        return
-    }
+    response := ws.parse_http_the_stupid_way(request) or_return
     fmt.print(response)
     defer delete(response)
 
     bytes_sent, send_err := net.send_tcp(client.socket, transmute([]byte)response)
-    if client_drop_on_error(client, send_err) {
-        return
+    if send_err != nil {
+        return net.Network_Error(send_err)
     }
     client.status = .Connected
     log.info("handshake success")
+    
+    return nil
 }
 
-client_handle :: proc(client: ^Client) {
+client_handle :: proc(client: ^Client) -> Client_Error {
+    if client.status == .Handshaking {
+        return client_handshake(client)
+    }
+
     receive: for {
         bytes_read, err := net.recv_tcp(client.socket, client.receive_buf[client.bytes_read:])
 
@@ -183,8 +194,7 @@ client_handle :: proc(client: ^Client) {
         case .Interrupted:
             continue
         case:
-            client_drop_on_error(client, err)
-            return
+            return net.Network_Error(err)
         }
     }
 
@@ -196,11 +206,9 @@ client_handle :: proc(client: ^Client) {
         client.bytes_parsed += bytes_parsed
         if decode_err != .None {
             if decode_err == .Too_Short { // try again later
-                return
+                return nil
             }
-            log.debug(decode_err)
-            client_drop(client)
-            return
+            return decode_err
         }
     
         log.info("frame.opcode =", frame.opcode)
@@ -208,9 +216,9 @@ client_handle :: proc(client: ^Client) {
         log.info("frame.is_final =", frame.is_final)
         fmt.println(string(frame.payload))
     
+        //TODO: this should be handles by the library
         if ((int(frame.opcode) & ws.OPCODE_CONTROL_BIT) > 0) && (len(frame.payload) > 125) {
-            client_drop(client)
-            return
+            return ws.Error.Control_Frame_Payload_Too_Long
         }
         
         if !frame.is_final && client.current_message == nil {
@@ -240,14 +248,12 @@ client_handle :: proc(client: ^Client) {
             }
             else if int(frame.opcode) & ws.OPCODE_CONTROL_BIT == 0 {
                 // the client tried to interject a non-control frame, shut 'em down
-                client_drop(client)
-                return
+                return ws.Error.Interjected_Control_Frame
             }
         }
         if frame.opcode == .Continuation {
             // valid continuation frames shouldn't get to this point
-            client_drop(client)
-            return
+            return ws.Error.Unexpected_Continuation_Frame
         }
 
         if int(frame.opcode) & ws.OPCODE_CONTROL_BIT > 0 {
@@ -257,7 +263,7 @@ client_handle :: proc(client: ^Client) {
             }
             if frame.opcode == .Close {
                 client_drop_clean(client)
-                return
+                return nil
             }
             if frame.opcode == .Pong {
                 continue // ignore unsolicited pong
@@ -268,15 +274,11 @@ client_handle :: proc(client: ^Client) {
         }
 
         if frame.opcode == .Text && !utf8.valid_string(string(frame.payload)) {
-            client_drop(client)
-            return
+            return ws.Error.Invalid_Utf8
         }
     
-        _, send_err := client_send(client, frame.opcode, frame.payload)
-        if send_err != nil {
-            client_drop(client)
-            return
-        }
+        //NOTE: we don't bother checking to see if we sent it all
+        _ = client_send(client, frame.opcode, frame.payload) or_return
 
         if client.current_message == nil {
             // reset
@@ -298,6 +300,7 @@ client_handle :: proc(client: ^Client) {
             savings = 0
         }
     }
+    return nil
 }
 
 client_send :: proc(client: ^Client, oc: ws.Opcode, payload: []byte, final := true) -> (bytes_writ: int, err: net.Network_Error) {
