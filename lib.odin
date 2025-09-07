@@ -1,5 +1,8 @@
 package websockets
 
+import "base:runtime"
+import "core:container/avl"
+import "core:strconv"
 import "core:reflect"
 import "core:fmt"
 import "core:log"
@@ -15,6 +18,8 @@ import "core:unicode/utf8"
 
 import "core:crypto/legacy/sha1"
 import "core:encoding/base64"
+
+MAX_LENGTH_OF_HEADER :: 14
 
 // the best data structure
 Pile :: struct {
@@ -152,7 +157,6 @@ decode_frame :: proc(data: []byte) -> (frame: Frame, bytes_parsed: int, err: Err
 }
 
 create_frame :: proc(buf: []byte, oc: Opcode, payload: []byte, final := true) -> (packet_1: []byte, packet_2: Maybe([]byte)) {
-    MAX_LENGTH_OF_HEADER :: 14
     assert(len(buf) >= MAX_LENGTH_OF_HEADER)
     
     header := pile_create(buf)
@@ -231,4 +235,12 @@ parse_http_the_stupid_way :: proc(request: string) -> (response: string, err: Er
 
         return
     }
+}
+
+default_handshake :: proc(gen := context.random_generator) -> string {
+    context.random_generator = gen
+
+    request := "GET / HTTP/1.1\r\nUpgrade: WebSocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: i+Bin5OHtzB8biRq25i9EQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+
+    return request
 }
