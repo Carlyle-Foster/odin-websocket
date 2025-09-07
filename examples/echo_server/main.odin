@@ -49,6 +49,8 @@ main :: proc() {
     server_socket, listen_err := net.listen_tcp({ address=net.IP4_Loopback, port=8783})
     assert(listen_err == nil, fmt.aprint(listen_err))
 
+    _ = net.set_blocking(server_socket, should_block=false)
+
     register_err := selector.register_socket(&g_selector, net.Socket(server_socket), { .Readable }, SERVER_ID)
     assert(register_err == nil, fmt.aprint(register_err))
 
@@ -101,6 +103,8 @@ client_create :: proc(socket: net.TCP_Socket, allocator := context.allocator) ->
 client_accept :: proc(server: TCP_Socket) {
     client_socket, endpoint, accept_err := net.accept_tcp(server)
 
+    _ = net.set_blocking(client_socket, should_block=false)
+
     if accept_err != nil {
         log.info("dropped client when accepting because of Error:", accept_err)
         return
@@ -145,13 +149,27 @@ client_handshake :: proc(client: ^Client) {
 }
 
 client_handle :: proc(client: ^Client) {
-    bytes_read, recv_err := net.recv_tcp(client.socket, client.receive_buf)
+    receive: for {
+        bytes_read, recv_err := net.recv_tcp(client.socket, client.receive_buf[client.bytes_read:])
 
-    if client_drop_on_error(client, recv_err) {
-        return
+        #partial switch recv_err {
+        case .None:
+            client.bytes_read += bytes_read
+
+            if bytes_read == 0 {
+                break receive
+            }
+        case .Would_Block:
+            break receive
+        case .Interrupted:
+            continue
+        case:
+            client_drop_on_error(client, recv_err)
+            return
+        }
     }
 
-    client.bytes_read += bytes_read
+    //TODO: handle EAGAIN
 
     savings := 0
 
@@ -222,6 +240,8 @@ client_handle :: proc(client: ^Client) {
             }
             if frame.opcode == .Close {
                 _, _ = client_send(client, .Close, nil)
+                //TODO: should we wait a while and/or flush the socket b4 closing?
+                client_drop(client)
                 return
             }
             if frame.opcode == .Pong {
@@ -256,7 +276,7 @@ client_handle :: proc(client: ^Client) {
         else {
             dst := client.receive_buf[client.bytes_parsed - savings:client.bytes_read]
             src := client.receive_buf[client.bytes_parsed          :client.bytes_read]
-            mem.copy(raw_data(dst), raw_data(src), len(src))
+            copy(dst, src)
 
             client.bytes_parsed -= savings
             client.bytes_read = client.bytes_parsed + len(src)
