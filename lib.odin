@@ -1,20 +1,10 @@
 package websockets
 
-import "base:runtime"
-import "core:container/avl"
-import "core:strconv"
-import "core:reflect"
 import "core:fmt"
-import "core:log"
-import "core:io"
-import "core:mem"
-import "core:slice"
 import "core:strings"
-import "core:encoding/endian"
-import "core:math/bits"
+import "core:reflect"
 import "core:math/rand"
-import "core:net"
-import "core:unicode/utf8"
+import "core:encoding/endian"
 
 import "core:crypto/legacy/sha1"
 import "core:encoding/base64"
@@ -41,8 +31,6 @@ pile_push_back_elems :: proc(p: ^Pile, bytes: []byte) {
 pile_as_slice :: proc(p: Pile) -> []byte {
     #no_bounds_check return p.data[:p.len]
 }
-
-Websocket :: net.TCP_Socket
 
 Opcode :: enum u8 {
     Continuation = 0x0,

@@ -4,6 +4,7 @@ import "core:log"
 import "core:fmt"
 import "core:mem"
 import "core:slice"
+import "core:io"
 
 import "core:net"
 import "core:math/rand"
@@ -43,6 +44,7 @@ Server_Error :: union #shared_nil {
 Client_Error :: union #shared_nil {
     net.Network_Error,
     selector.Error,
+    io.Error,
     ws.Error,
 }
 
@@ -102,13 +104,12 @@ handle_event :: proc(server: net.TCP_Socket, event: selector.Event) {
 
     if id == SERVER_ID {
         client_accept(server)
-
     } else {
         client := &g_clients[id]
 
         err := client_handle(client)
 
-        if err != nil {
+        if err != nil && err != ws.Error.Too_Short {
             log.infof("dropped client %v because of Error: %v", id, err)
             client_drop(client)
         }
@@ -152,16 +153,14 @@ client_accept :: proc(server: net.TCP_Socket) {
 }
 
 client_handshake :: proc(client: ^Client) -> Client_Error {
-    bytes_read, recv_err := net.recv_tcp(client.socket, client.receive_buf)
-    if recv_err != nil {
-        return net.Network_Error(recv_err)
-    }
+    stream := tcp_socket_2_stream(client.socket)
+    io.read(stream, client.receive_buf[client.bytes_read:], &client.bytes_read) or_return
 
-    request := string(client.receive_buf[:bytes_read])
-    fmt.print(request)
+    request := string(client.receive_buf[:client.bytes_read])
+    // fmt.print(request)
 
     response := ws.parse_http_the_stupid_way(request) or_return
-    fmt.print(response)
+    // fmt.print(response)
     defer delete(response)
 
     bytes_sent, send_err := net.send_tcp(client.socket, transmute([]byte)response)
@@ -169,6 +168,7 @@ client_handshake :: proc(client: ^Client) -> Client_Error {
         return net.Network_Error(send_err)
     }
     client.status = .Connected
+    client.bytes_read = 0
     log.info("handshake success")
     
     return nil
@@ -179,24 +179,8 @@ client_handle :: proc(client: ^Client) -> Client_Error {
         return client_handshake(client)
     }
 
-    receive: for {
-        bytes_read, err := net.recv_tcp(client.socket, client.receive_buf[client.bytes_read:])
-
-        #partial switch err {
-        case .None:
-            client.bytes_read += bytes_read
-
-            if bytes_read == 0 {
-                break receive
-            }
-        case .Would_Block:
-            break receive
-        case .Interrupted:
-            continue
-        case:
-            return net.Network_Error(err)
-        }
-    }
+    stream := tcp_socket_2_stream(client.socket)
+    io.read(stream, client.receive_buf[client.bytes_read:], &client.bytes_read) or_return
 
     savings := 0
 
@@ -214,7 +198,7 @@ client_handle :: proc(client: ^Client) -> Client_Error {
         log.info("frame.opcode =", frame.opcode)
         log.info("len(frame.payload) =", len(frame.payload))
         log.info("frame.is_final =", frame.is_final)
-        fmt.println(string(frame.payload))
+        // fmt.println(string(frame.payload))
     
         //TODO: this should be handles by the library
         if ((int(frame.opcode) & ws.OPCODE_CONTROL_BIT) > 0) && (len(frame.payload) > 125) {
@@ -334,4 +318,49 @@ client_drop_on_error :: proc(client: ^Client, err: net.Network_Error, loc := #ca
         client_drop(client)
     }
     return err != nil
+}
+
+// *Stream implementation*
+
+tcp_socket_2_stream :: proc(socket: net.TCP_Socket) -> io.Stream {
+    return {
+        procedure = tcp_socket_stream_proc,
+        data = rawptr(uintptr(socket)),
+    }
+}
+
+tcp_socket_stream_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
+    socket := net.TCP_Socket(uintptr(stream_data))
+
+    #partial switch mode {
+    case .Read:
+        receive: for {
+            bytes_read, err := net.recv_tcp(socket, p[n:])
+            #partial switch err {
+            case .None:
+                n += i64(bytes_read)
+
+                if bytes_read == 0 {
+                    break receive
+                }
+            case .Would_Block:
+                break receive
+            case .Interrupted:
+                continue
+            case:
+                // TODO: i really don't like this
+                err = .Unknown
+                return
+            }
+        }
+        return
+    case .Write:
+        unimplemented()
+    case .Close:
+        unimplemented()
+    case .Query:
+        return io.query_utility({ .Read, .Write, .Close, .Query})
+    }
+
+    return 0, .Empty
 }
