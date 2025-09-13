@@ -62,8 +62,6 @@ Error :: enum {
     Too_Short,
     Reserved_Bits_Used,
     Missing_Contination_Frame,
-    Connection_Closed,
-    Failed_To_Send,
     Invalid_Opcode,
     Fragmented_Control_Frame,
     Invalid_Utf8,
