@@ -1,3 +1,9 @@
 ols.json
 docker
 runtests.sh
+https_certificates
+
+# binaries
+echo_server
+interactive_client
+stress_tester

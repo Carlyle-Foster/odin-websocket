@@ -11,7 +11,7 @@ import "core:net"
 Thread :: thread.Thread
 
 main :: proc() {
-    context.logger = log.create_console_logger()
+    context.logger = log.create_console_logger()    
 
     threads: [dynamic]^Thread
     defer delete(threads)

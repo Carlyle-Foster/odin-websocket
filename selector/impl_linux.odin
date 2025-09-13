@@ -85,7 +85,7 @@ epoll_event_2_event :: proc(epoll_event: linux.EPoll_Event) -> Event {
 }
 
 @(private)
-errno_2_error :: proc(errno: linux.Errno) -> Error {
+errno_2_error :: proc(errno: linux.Errno, loc := #caller_location) -> Error {
     #partial switch errno {
         case .NONE: return .None
 
@@ -94,6 +94,6 @@ errno_2_error :: proc(errno: linux.Errno) -> Error {
 
         case .EMFILE: return .Too_many_File_Descriptors_In_Process
         case .ENFILE: return .Too_many_File_Descriptors_In_System
-        case: unimplemented()
+        case: unimplemented(loc=loc)
     }
 }
