@@ -368,7 +368,7 @@ client_handle_write :: proc(client: ^Client) -> Client_Error {
 }
 
 client_send :: proc(client: ^Client, oc: ws.Opcode, payload: []byte, final := true) -> (bytes_writ: int, err: io.Error) {
-    buf: [1024 * 128]byte
+    buf: [1024]byte
     stream := client.socket
     packet_1, packet_2 := ws.create_frame(buf[:], oc, payload, final)
 

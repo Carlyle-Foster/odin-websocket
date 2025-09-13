@@ -96,18 +96,16 @@ to_tcp_socket :: proc(conn: Connection) -> Tcp_Socket {
 connection_stream_proc :: proc(stream_data: rawptr, mode: Stream_Mode, p: []byte, _: i64, _: Seek_From) -> (n: i64, err: io.Error) {
     ssl := (^SSL)(stream_data)
 
-    buf := raw_data(p)
-    num := i32(len(p))
-
     n_: u64 = 0
 
     #partial switch mode {
     case .Read:
         ssl_err: openssl.Error
         // `SSL_read_ex` reads at most a single 16 kilobyte TLS record at a time
-        for n < i64(num) && ssl_err == nil {
+        for int(n) < len(p) && ssl_err == nil {
             n += i64(n_)
-            read_ok := openssl.SSL_read_ex(ssl, buf[int(n_):], num - i32(n), &n_)
+            buf := p[n:]
+            read_ok := openssl.SSL_read_ex(ssl, raw_data(buf), i32(len(buf)), &n_)
             ssl_err = openssl.SSL_get_error(ssl, i32(read_ok))
         }
         #partial switch ssl_err {
@@ -127,7 +125,7 @@ connection_stream_proc :: proc(stream_data: rawptr, mode: Stream_Mode, p: []byte
             return
         }
     case .Write:
-        write_ok := openssl.SSL_write_ex(ssl, buf, num, &n_)
+        write_ok := openssl.SSL_write_ex(ssl, raw_data(p), i32(len(p)), &n_)
 
         ssl_err := openssl.SSL_get_error(ssl, i32(write_ok))
 
