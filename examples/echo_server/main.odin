@@ -226,7 +226,7 @@ client_handshake :: proc(client: ^Client) -> Client_Error {
     }
 
     response := ws.parse_http_the_stupid_way(request) or_return
-        when SHOW_HANDSHAKE {
+    when SHOW_HANDSHAKE {
         fmt.print(response)
     }
     defer delete(response)
@@ -267,11 +267,6 @@ client_handle_read :: proc(client: ^Client) -> Client_Error {
         log.info("len(frame.payload) =", len(frame.payload))
         log.info("frame.is_final =", frame.is_final)
         // fmt.println(string(frame.payload))
-    
-        //TODO: this should be handles by the library
-        if ((int(frame.opcode) & ws.OPCODE_CONTROL_BIT) > 0) && (len(frame.payload) > 125) {
-            return ws.Error.Control_Frame_Payload_Too_Long
-        }
         
         if !frame.is_final && client.current_message == nil {
             client.current_message = frame

@@ -89,10 +89,6 @@ decode_frame :: proc(data: []byte) -> (frame: Frame, bytes_parsed: int, err: Err
         err = .Invalid_Opcode
         return
     }
-    if int(frame.opcode) & OPCODE_CONTROL_BIT > 0 && !frame.is_final {
-        err = .Fragmented_Control_Frame
-        return
-    }
 
     masked := data[1] & 0b1000_0000 > 0
     payload_len := int(data[1] & 0b0111_1111)
@@ -138,6 +134,16 @@ decode_frame :: proc(data: []byte) -> (frame: Frame, bytes_parsed: int, err: Err
         }
     }
 
+    if int(frame.opcode) & OPCODE_CONTROL_BIT > 0 {
+        if !frame.is_final {
+            err = .Fragmented_Control_Frame
+            return
+        }
+        if len(payload) > 125 {
+            err = .Control_Frame_Payload_Too_Long
+            return
+        }
+    }
     frame.payload = payload
     frame.header_len = i8(header_len)
     bytes_parsed = header_len + payload_len
