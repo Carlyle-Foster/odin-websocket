@@ -67,7 +67,7 @@ Error :: enum {
     Invalid_Opcode,
     Fragmented_Control_Frame,
     Invalid_Utf8,
-    Interjected_Control_Frame,
+    Interjected_Data_Frame,
     Unexpected_Continuation_Frame,
     Control_Frame_Payload_Too_Long,
     Wet_Handshake,

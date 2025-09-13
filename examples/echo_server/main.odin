@@ -295,7 +295,7 @@ client_handle_read :: proc(client: ^Client) -> Client_Error {
             }
             else if int(frame.opcode) & ws.OPCODE_CONTROL_BIT == 0 {
                 // the client tried to interject a non-control frame, shut 'em down
-                return ws.Error.Interjected_Control_Frame
+                return ws.Error.Interjected_Data_Frame
             }
         }
         if frame.opcode == .Continuation {
