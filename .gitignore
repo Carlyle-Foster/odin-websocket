@@ -1,7 +1,4 @@
 ols.json
-docker
-runtests.sh
-https_certificates
 
 # binaries
 echo_server
