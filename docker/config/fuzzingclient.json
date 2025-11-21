@@ -1,9 +1,9 @@
 {
     "options": {},
-    "outdir": "/reports/servers",
+    "outdir": "/reports",
     "servers": [
       {
-        "agent": "AVR / W5100 / Ethernet",
+        "agent": "echo_server",
         "url": "wss://127.0.0.1:8783"
       }
     ],
