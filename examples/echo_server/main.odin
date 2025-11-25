@@ -1,22 +1,23 @@
 package echo
 
-import "core:strconv"
 import "core:log"
 import "core:fmt"
-import "core:mem"
-import "core:slice"
 import "core:io"
 
 import "core:net"
 import "core:math/rand"
-import "core:unicode/utf8"
 
 import ws "../../../odin-websockets"
 import "../../selector"
 import "../../ssl"
 
+// *Config*
+
 SECURED         :: 1==1
 SHOW_HANDSHAKE  :: 1==1
+
+ADDRESS :: net.IP4_Loopback
+PORT    :: 8783
 
 // *Constants*
 
@@ -36,9 +37,6 @@ Client :: struct {
     socket: io.Stream,
     receive_buf: []byte,
     bytes_read: int,
-    
-    current_message: Maybe(ws.Frame),
-    bytes_parsed: int,
 }
 
 Server_Error :: union #shared_nil {
@@ -84,9 +82,7 @@ run_server :: proc() -> Server_Error {
 
     selector.init(&g_selector) or_return
 
-    address := net.IP4_Loopback
-    port    := 8783
-    server_socket := net.listen_tcp({ address, port }) or_return
+    server_socket := net.listen_tcp({ ADDRESS, PORT }) or_return
     net.set_blocking(server_socket, should_block=false)
 
     selector.register_socket(
@@ -101,7 +97,7 @@ run_server :: proc() -> Server_Error {
         event_count := selector.select(
             &g_selector,
             events[:],
-            nil,
+            timeout_nanosecs=nil,
         ) or_return
 
         for event in events[:event_count] {
@@ -118,57 +114,28 @@ handle_event :: proc(server: net.TCP_Socket, event: selector.Event) {
     id := Source_ID(event.id)
     interests := event.interests
 
-    handshaking := 0
-    not := 0
-    for _, client in g_clients {
-        if client.status == .Handshaking { handshaking += 1 } else { not += 1 }
-    }
-    fmt.println()
-    log.infof("handshaking: %v, not: %v", handshaking, not)
-
     if id == SERVER_ID {
         client_accept(server)
     } else {
         client := &g_clients[id]
 
-        log.debug(client.status, interests)
-
-        if .Readable in interests {
-            err := client_handle_read(client)
-
-            if err != nil {
-                assert(err != io.Error.Empty)
-    
-                if err == ws.Error.Too_Short {
-                    log.debug("would block")
-                } else if err == io.Error.EOF {
-                    client_drop_clean(client)
-                } else {
-                    log.infof("dropped client %v because of Error: %v", id, err)
-                    client_drop(client)
-                }
-                return
-            }
-            log.debug("handled read without error")
+        err: Client_Error
+        if client.status == .Handshaking {
+            err = client_handshake(client)
+        } else if .Readable in interests {
+            err = client_handle_read(client)
         }
-
-        if .Writeable in interests {
-            err := client_handle_write(client)
-
-            if err != nil {
-                assert(err != io.Error.Empty)
-    
-                if err == ws.Error.Too_Short {
-                    log.debug("would block")
-                } else if err == io.Error.EOF {
-                    client_drop_clean(client)
-                } else {
-                    log.infof("dropped client %v because of Error: %v", id, err)
-                    client_drop(client)
-                }
-                return
+        if err != nil {    
+            if err == ws.Error.Too_Short {
+                log.debug("too short")
+            } else if err == io.Error.EOF || err == ws.Error.Closing {
+                _, _ = client_send_close(client, .Normal)
+                client_drop(client)
+            } else {
+                log.infof("dropped client %v because of Error: %v", id, err)
+                client_drop(client)
             }
-            log.debug("handled writ without error")
+            return
         }
     }
 }
@@ -231,10 +198,8 @@ client_handshake :: proc(client: ^Client) -> Client_Error {
     }
     defer delete(response)
 
-    bytes_sent, send_err := io.write(stream, transmute([]byte)response)
-    if send_err != nil {
-        return send_err
-    }
+    bytes_sent := io.write(stream, transmute([]byte)response) or_return
+
     client.status = .Connected
     client.bytes_read = 0
     log.info("handshake success")
@@ -243,129 +208,32 @@ client_handshake :: proc(client: ^Client) -> Client_Error {
 }
 
 client_handle_read :: proc(client: ^Client) -> Client_Error {
-    if client.status == .Handshaking {
-        return client_handshake(client)
-    }
-
     stream := client.socket
     io.read(stream, client.receive_buf[client.bytes_read:], &client.bytes_read) or_return
 
-    savings := 0
-
     for {
-        frontier := client.receive_buf[client.bytes_parsed:client.bytes_read]
-        frame, bytes_parsed, decode_err := ws.decode_frame(frontier)
-        client.bytes_parsed += bytes_parsed
-        if decode_err != .None {
-            if decode_err == .Too_Short { // try again later
-                return ws.Error.Too_Short
-            }
-            return decode_err
-        }
+        frontier := client.receive_buf[:client.bytes_read]
+        message, bytes_parsed := ws.decode_frame(frontier) or_return
     
-        log.info("frame.opcode =", frame.opcode)
-        log.info("len(frame.payload) =", len(frame.payload))
-        log.info("frame.is_final =", frame.is_final)
         // fmt.println(string(frame.payload))
-        
-        if !frame.is_final && client.current_message == nil {
-            client.current_message = frame
-            continue
-        }
-        if client.current_message != nil {
-            if frame.opcode == .Continuation {
-                current_msg := &client.current_message.(ws.Frame)
-
-                log.info("compacting")
-                end := &raw_data(current_msg.payload)[len(current_msg.payload)]
-                mem.copy(end, raw_data(frame.payload), len(frame.payload))
-
-                new_len := len(current_msg.payload) + len(frame.payload)
-                current_msg.payload = slice.from_ptr(raw_data(current_msg.payload), new_len)
-                
-                savings += int(frame.header_len)
-
-                if !frame.is_final {
-                    continue
-                } else {
-                    current_msg.is_final = true
-                    frame = current_msg^
-                    client.current_message = nil
-                }
-            }
-            else if int(frame.opcode) & ws.OPCODE_CONTROL_BIT == 0 {
-                // the client tried to interject a non-control frame, shut 'em down
-                return ws.Error.Interjected_Data_Frame
-            }
-        }
-        if frame.opcode == .Continuation {
-            // valid continuation frames shouldn't get to this point
-            return ws.Error.Unexpected_Continuation_Frame
-        }
-
-        if int(frame.opcode) & ws.OPCODE_CONTROL_BIT > 0 {
-            if client.current_message != nil {
-                log.info("ap enny saved...")
-                savings += bytes_parsed
-            }
-            if frame.opcode == .Close {
-                return io.Error.EOF
-            }
-            if frame.opcode == .Pong {
-                continue // ignore unsolicited pong
-            }
-            if frame.opcode == .Ping {
-                frame.opcode = .Pong
-            }
-        }
-
-        if frame.opcode == .Text && !utf8.valid_string(string(frame.payload)) {
-            return ws.Error.Invalid_Utf8
-        }
     
         //NOTE: we don't bother checking to see if we sent it all
-        _ = client_send(client, frame.opcode, frame.payload) or_return
+        _ = client_send(client, message) or_return
 
-        if client.current_message == nil {
-            // reset
-            client.bytes_read -= client.bytes_parsed
-            if client.bytes_read > 0 {
-                // shift everything down
-                log.info("shifting down")
-                copy(client.receive_buf[:], client.receive_buf[client.bytes_parsed:][:client.bytes_read])
-            }
-            client.bytes_parsed = 0
-        }
-        else {
-            dst := client.receive_buf[client.bytes_parsed - savings:client.bytes_read]
-            src := client.receive_buf[client.bytes_parsed          :client.bytes_read]
-            copy(dst, src)
-
-            client.bytes_parsed -= savings
-            client.bytes_read = client.bytes_parsed + len(src)
-            savings = 0
+        // reset
+        client.bytes_read -= bytes_parsed
+        if client.bytes_read > 0 {
+            // shift everything down
+            copy(client.receive_buf[:], client.receive_buf[bytes_parsed:][:client.bytes_read])
         }
     }
     return nil
 }
 
-client_handle_write :: proc(client: ^Client) -> Client_Error {
-    // assert(client.status == .Handshaking)
-    
-    if client.status == .Handshaking {
-        return client_handshake(client)
-    }
-    if SECURED {
-        assert(ssl.connection_is_handshaking(client.socket) == false)
-    }
-    log.info("ignored writable")
-    return nil
-}
-
-client_send :: proc(client: ^Client, oc: ws.Opcode, payload: []byte, final := true) -> (bytes_writ: int, err: io.Error) {
+client_send :: proc(client: ^Client, payload: []byte) -> (bytes_writ: int, err: io.Error) {
     buf: [1024]byte
     stream := client.socket
-    packet_1, packet_2 := ws.create_frame(buf[:], oc, payload, final)
+    packet_1, packet_2 := ws.create_binary_frame(buf[:], payload)
 
     bytes_writ = io.write(stream, packet_1) or_return
     assert(bytes_writ == len(packet_1))
@@ -376,6 +244,13 @@ client_send :: proc(client: ^Client, oc: ws.Opcode, payload: []byte, final := tr
     }
 
     return
+}
+
+client_send_close :: proc(client: ^Client, reason: ws.Close_Reason) -> (bytes_writ: int, err: io.Error) {
+    buf: [128]byte
+    packet := ws.create_close_frame(buf[:], reason)
+
+    return io.write(client.socket, packet)
 }
 
 client_drop :: proc(client: ^Client) {
@@ -390,19 +265,6 @@ client_drop :: proc(client: ^Client) {
     io.close(client.socket)
 
     g_clients[client.id] = {}
-}
-
-client_drop_clean :: proc(client: ^Client) {
-    _, _ = client_send(client, .Close, {})
-    client_drop(client)
-}
-
-client_drop_on_error :: proc(client: ^Client, err: net.Network_Error, loc := #caller_location) -> (was_err: bool) {
-    if err != nil {
-        log.infof("dropped client %v because of Error: %v", client.id, err, location=loc)
-        client_drop(client)
-    }
-    return err != nil
 }
 
 // *`io.Stream` implementation*
@@ -438,6 +300,7 @@ tcp_socket_stream_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []b
                 continue
             case:
                 // TODO: i really don't like this
+                log.debug(recv_err)
                 err = .Unknown
                 return
             }
@@ -458,12 +321,14 @@ tcp_socket_stream_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []b
             case .Interrupted:
                 continue
             case:
+                log.debug(send_err)
                 err = .Unknown
                 return
             }
         }
         return
     case .Close:
+        log.debug("closing TCP")
         net.close(socket)
     case .Query:
         return io.query_utility({ .Read, .Write, .Close, .Query})

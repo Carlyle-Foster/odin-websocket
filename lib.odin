@@ -11,85 +11,64 @@ import "core:encoding/base64"
 
 MAX_LENGTH_OF_HEADER :: 14
 
-// the best data structure
-Pile :: struct {
-    data: []byte,
-    len: int,
-}
-pile_create :: proc(buf: []byte) -> Pile {
-    return Pile{data=buf}
-}
-pile_push :: proc { pile_push_back, pile_push_back_elems }
-pile_push_back :: proc(p: ^Pile, bite: byte) {
-    #no_bounds_check p.data[p.len] = bite
-    p.len += 1
-}
-pile_push_back_elems :: proc(p: ^Pile, bytes: []byte) {
-    copy(p.data[p.len:], bytes)
-    p.len += len(bytes)
-}
-pile_as_slice :: proc(p: Pile) -> []byte {
-    #no_bounds_check return p.data[:p.len]
-}
-
 Opcode :: enum u8 {
-    Continuation = 0x0,
-    Text = 0x1,
+    // Continuation = 0x0,
+    Text = 0x1, // NOTE: text is not validated
     Binary = 0x2,
     Close = 0x8,
-    Ping = 0x9,
-    Pong = 0xA,
-}
-OPCODE_CONTROL_BIT :: 0b0000_1000
-
-Masking :: enum {
-    True,
-    False,
-    Default,
-}
-
-Frame :: struct {
-    payload: []byte,
-
-    opcode: Opcode,
-    is_final: bool,
-
-    header_len: i8,
+    // Ping = 0x9,
+    // Pong = 0xA,
 }
 
 Error :: enum {
-    None,
+    None = 0,
     Too_Short,
     Reserved_Bits_Used,
-    Missing_Contination_Frame,
-    Invalid_Opcode,
-    Fragmented_Control_Frame,
-    Invalid_Utf8,
-    Interjected_Data_Frame,
-    Unexpected_Continuation_Frame,
-    Control_Frame_Payload_Too_Long,
+    Fragmentation_Unsupported,
+    Opcode_Unsupported,
     Wet_Handshake,
+    Closing,
 }
 
-decode_frame :: proc(data: []byte) -> (frame: Frame, bytes_parsed: int, err: Error) {
+Close_Reason :: enum u16 {
+    No_Reason_Given = 999,
+    Normal = 1000,
+    Going_Away,
+    Protocol_Error,
+    Unsupported_Data_Type,
+
+    Data_Type_Mismatch = 1007,
+    Policy_Violation,
+    Message_Too_Big,
+    Missing_Required_Extensions,
+    Unexpected_Circumstances,
+}
+
+decode_frame :: proc(data: []byte) -> (payload: []byte, bytes_parsed: int, err: Error) {
     header_len := 2
     if len(data) < header_len {
         err = .Too_Short
         return
     }
-    frame.is_final = (data[0] & 0b1000_0000) > 0
-    if data[0] & 0b0111_0000 != 0 {
-        err = .Reserved_Bits_Used
-        return
-    }
-    frame.opcode = Opcode(data[0] & 0b0000_1111)
-    if !reflect.enum_value_has_name(frame.opcode) {
-        err = .Invalid_Opcode
+
+    top_nibble := data[0] & 0xf0
+    if top_nibble != 0x80 {
+        if top_nibble & 0x70 > 0 {
+            err = .Reserved_Bits_Used
+        } else {
+            err = .Fragmentation_Unsupported
+        }
         return
     }
 
-    masked := data[1] & 0b1000_0000 > 0
-    payload_len := int(data[1] & 0b0111_1111)
+    opcode := Opcode(data[0] & 0x0f)
+    if !reflect.enum_value_has_name(opcode) {
+        err = .Opcode_Unsupported
+        return
+    }
+
+    masked := data[1] & 0x80 > 0
+    payload_len := int(data[1] & 0x7f)
     switch payload_len {
     case 0..=125: {}
     case 126:
@@ -101,12 +80,12 @@ decode_frame :: proc(data: []byte) -> (frame: Frame, bytes_parsed: int, err: Err
         payload_len = int(len_16)
         header_len += 2
     case 127: 
-        len_16, len_ok := endian.get_u64(data[2:], .Big)
+        len_64, len_ok := endian.get_u64(data[2:], .Big)
         if !len_ok {
             err = .Too_Short
             return
         }
-        payload_len = int(len_16)
+        payload_len = int(len_64)
         header_len += 8
     case:
         unreachable()
@@ -121,40 +100,55 @@ decode_frame :: proc(data: []byte) -> (frame: Frame, bytes_parsed: int, err: Err
         }
         header_len += 4
     }
+
+    if opcode == .Close {
+        if payload_len >= size_of(Close_Reason) {
+            err = .Closing
+
+            header_len  += size_of(Close_Reason)
+            payload_len -= size_of(Close_Reason)
+        }
+    }
+
     if len(data) < header_len + payload_len {
         err = .Too_Short
         return
     }
-    payload := data[header_len:][:payload_len]
+
+    payload = data[header_len:][:payload_len]
     if masked {
         for i in 0..<len(payload) {
             payload[i] ~= (transmute([4]byte)mask)[i % size_of(u32)]
         }
     }
-
-    if int(frame.opcode) & OPCODE_CONTROL_BIT > 0 {
-        if !frame.is_final {
-            err = .Fragmented_Control_Frame
-            return
-        }
-        if len(payload) > 125 {
-            err = .Control_Frame_Payload_Too_Long
-            return
-        }
-    }
-    frame.payload = payload
-    frame.header_len = i8(header_len)
     bytes_parsed = header_len + payload_len
     return
 }
 
-create_frame :: proc(buf: []byte, oc: Opcode, payload: []byte, final := true) -> (packet_1: []byte, packet_2: Maybe([]byte)) {
+get_close_reason :: proc(data: []byte) -> Close_Reason {
+    reason := get_close_reason(data)
+    return Close_Reason(reason)
+}
+get_close_reason_custom :: proc(data: []byte) -> u16 {
+    code: u16
+    masked := data[1] & 0x80 > 0
+    if masked {
+        code, _ = endian.get_u16(data[6:], .Big)
+    } else {
+        code, _ = endian.get_u16(data[2:], .Big)
+    }
+    return code
+}
+
+create_binary_frame :: proc(buf: []byte, payload: []byte, masked := false) -> (packet_1: []byte, packet_2: Maybe([]byte)) {
     assert(len(buf) >= MAX_LENGTH_OF_HEADER)
     
     header := pile_create(buf)
-    pile_push(&header, u8(oc) | (transmute(u8)final << 7))
+    final :: 1
+    oc :: Opcode.Binary
+    pile_push(&header, u8(oc) | (final << 7))
 
-    mask_bit := u8(0)
+    mask_bit := u8(masked)
     payload_len := len(payload)
     if payload_len < 126 {
         pile_push(&header, u8(payload_len) | (mask_bit << 7))
@@ -170,11 +164,8 @@ create_frame :: proc(buf: []byte, oc: Opcode, payload: []byte, final := true) ->
         pile_push(&header, len[:])
     }
 
-    if mask_bit > 0 {
-        mask := transmute([4]byte)u32be(rand.uint32())
-        when ODIN_DEBUG {
-            mask = {0xff, 0xff, 0xff, 0xff}
-        }
+    if masked {
+        mask := get_mask()
         pile_push(&header, mask[:])
     }
 
@@ -188,7 +179,46 @@ create_frame :: proc(buf: []byte, oc: Opcode, payload: []byte, final := true) ->
     return
 }
 
-parse_http_the_stupid_way :: proc(request: string) -> (response: string, err: Error) {
+
+create_close_frame :: proc(buf: []byte, reason: Close_Reason, payload := "", masked := false) -> (packet: []byte) {
+    return create_close_frame_custom(buf, u16(reason), payload)
+}
+create_close_frame_custom :: proc(buf: []byte, reason: u16, payload := "", masked := false) -> (packet: []byte) {
+    assert(len(buf) >= 127)
+    assert(size_of(reason) + len(payload) <= 125)
+    
+    header := pile_create(buf)
+    final :: 1
+    pile_push(&header, u8(Opcode.Close) | (final << 7))
+
+    mask_bit := u8(masked)
+    payload_len := size_of(u16) + len(payload)
+    pile_push(&header, u8(payload_len) | (mask_bit << 7))
+
+    if masked {
+        mask := get_mask()
+        pile_push(&header, mask[:])
+    }
+
+    code := transmute([2]byte)u16be(reason)
+    pile_push(&header, code[:])
+    
+    pile_push(&header, transmute([]byte)payload)
+    packet = pile_as_slice(header)
+    return
+}
+
+@(private)
+get_mask :: proc() -> [4]byte {
+    when ODIN_DEBUG {
+        return {0xff, 0xff, 0xff, 0xff}
+    } else {
+        return transmute([4]byte)u32be(rand.uint32())
+    }
+}
+
+parse_http_the_stupid_way :: proc(request: string, buf: []byte) -> (response: string, err: Error) {
+    assert(len(buf) > 129)
     headers, _, _ := strings.partition(request, "\r\n\r\n")
     if len(headers) == len(request) { // the request is incomplete (no \r\n\r\n), so try again later
         err = .Too_Short
@@ -207,7 +237,7 @@ parse_http_the_stupid_way :: proc(request: string) -> (response: string, err: Er
 
             accept := useless_transformation(key)
             assert(len(accept) == 28)
-            response = fmt.aprintf(
+            response = fmt.bprintf(buf,
 "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %v\r\n\r\n",
                 accept,
             )

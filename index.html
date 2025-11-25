@@ -11,11 +11,12 @@
     </body>
     <script>
         let ws = new WebSocket("ws://127.0.0.1:8783");
+        ws.binaryType = "arraybuffer"
         
         response = document.getElementById("response");
         ws.onmessage = (msg) => {
             console.log(msg.data)
-            response.textContent = `Response: ${msg.data}`;
+            response.textContent = `Response: ${new TextDecoder().decode(msg.data)}`;
         }
         ws.onclose = (event) => {
             console.log("WebSocket closed.");

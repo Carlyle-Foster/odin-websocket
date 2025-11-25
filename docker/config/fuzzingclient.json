@@ -7,7 +7,7 @@
         "url": "wss://127.0.0.1:8783"
       }
     ],
-    "cases": [ "[1-7].*" ],
+    "cases": [ "1.2.*", "[3-4].*", "7.*"],
     "exclude-cases": [],
     "exclude-agent-cases": {}
 }

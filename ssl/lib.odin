@@ -11,8 +11,6 @@ Tcp_Socket :: net.TCP_Socket
 Stream_Mode :: io.Stream_Mode
 Seek_From :: io.Seek_From
 
-Connection :: io.Stream
-
 Context :: struct {}
 
 Error :: enum {
@@ -67,7 +65,7 @@ create_context :: proc($P: proc "c" () -> (^openssl.SSL_METHOD)) -> Maybe(^Conte
     }
 }
 
-from_tcp_socket :: proc(socket: Tcp_Socket, ctx: ^Context) -> Connection {
+from_tcp_socket :: proc(socket: Tcp_Socket, ctx: ^Context) -> io.Stream {
     ssl, ssl_ok := openssl.SSL_new((^openssl.SSL_CTX)(ctx)).?
     if !ssl_ok {
         openssl.ERR_print_errors_stderr()
@@ -89,7 +87,7 @@ from_tcp_socket :: proc(socket: Tcp_Socket, ctx: ^Context) -> Connection {
     }
 }
 
-to_tcp_socket :: proc(conn: Connection) -> Tcp_Socket {
+to_tcp_socket :: proc(conn: io.Stream) -> Tcp_Socket {
     return Tcp_Socket(openssl.SSL_get_fd((^openssl.SSL)(conn.data)))
 } 
 
@@ -171,6 +169,6 @@ connection_stream_proc :: proc(stream_data: rawptr, mode: Stream_Mode, p: []byte
     }
 }
 
-connection_is_handshaking :: proc(conn: Connection) -> bool {
+connection_is_handshaking :: proc(conn: io.Stream) -> bool {
     return openssl.SSL_do_handshake((^openssl.SSL)(conn.data)) != 1
 } 
