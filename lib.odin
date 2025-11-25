@@ -9,8 +9,14 @@ import "core:encoding/endian"
 import "core:crypto/legacy/sha1"
 import "core:encoding/base64"
 
+/*
+2 minimum + 8 when length > max(u16) + 4 when masked
+*/
 MAX_LENGTH_OF_HEADER :: 14
 
+/*
+Any opcode outside of this subset is supported
+*/
 Opcode :: enum u8 {
     // Continuation = 0x0,
     Text = 0x1, // NOTE: text is not validated
@@ -31,7 +37,6 @@ Error :: enum {
 }
 
 Close_Reason :: enum u16 {
-    No_Reason_Given = 999,
     Normal = 1000,
     Going_Away,
     Protocol_Error,
@@ -44,6 +49,23 @@ Close_Reason :: enum u16 {
     Unexpected_Circumstances,
 }
 
+/*
+Locates (and possibly unmasks) the `payload` within the websocket frame `data`.
+
+Inputs:
+- data: a websocket frame
+
+Returns:
+- payload: a view of the mesage contained within `data`
+- bytes_parsed: the amount of bytes in the frame header + `len(payload)`
+- err:
+    `Too_Short` if `data` is a partial frame, if it's `Closing` then `data` is a close
+    frame and you can call `get_close_reason` with `data` to get the reason and (possibly) a message.  
+    otherwise indicates that `data` is malformed
+
+Lifetimes:
+- `payload` <= `data`
+*/
 decode_frame :: proc(data: []byte) -> (payload: []byte, bytes_parsed: int, err: Error) {
     header_len := 2
     if len(data) < header_len {
@@ -125,19 +147,37 @@ decode_frame :: proc(data: []byte) -> (payload: []byte, bytes_parsed: int, err: 
     return
 }
 
-get_close_reason :: proc(data: []byte) -> Close_Reason {
-    reason := get_close_reason(data)
-    return Close_Reason(reason)
+
+/*
+Inputs:
+- data: the same `data` used in a previous call to `decode_frame` that returned `.Closing`
+
+Returns:
+- `Close_Reason`: the reason for closing, defaults to `.Normal` if no reason was given
+- `string`: a short text describing `Close_Reason`, defauls to `""` if no description was given
+
+Lifetimes:
+- `string`  <= `data`
+*/
+get_close_reason :: proc(data: []byte) -> (Close_Reason, string) {
+    reason, close_message := get_close_reason(data)
+    return Close_Reason(reason), close_message
 }
-get_close_reason_custom :: proc(data: []byte) -> u16 {
-    code: u16
+/*
+Same as `getclose_close_reason` but it makes no assumptions about what the reason code means.  
+
+The `Close_Reason` codes start at 1000 so you can easily use a custom error enum to
+signal errors in higher level binary protocols 
+*/
+get_close_reason_custom :: proc(data: []byte) -> (u16, string) {
     masked := data[1] & 0x80 > 0
-    if masked {
-        code, _ = endian.get_u16(data[6:], .Big)
+    offset := 6 if masked else 2
+    code, code_ok := endian.get_u16(data[offset:], .Big)
+    if code_ok {
+        return code, string(data[offset:])
     } else {
-        code, _ = endian.get_u16(data[2:], .Big)
+        return u16(Close_Reason.Normal), ""
     }
-    return code
 }
 
 create_binary_frame :: proc(buf: []byte, payload: []byte, masked := false) -> (packet_1: []byte, packet_2: Maybe([]byte)) {
@@ -217,10 +257,22 @@ get_mask :: proc() -> [4]byte {
     }
 }
 
-parse_http_the_stupid_way :: proc(request: string, buf: []byte) -> (response: string, err: Error) {
-    assert(len(buf) > 129)
-    headers, _, _ := strings.partition(request, "\r\n\r\n")
-    if len(headers) == len(request) { // the request is incomplete (no \r\n\r\n), so try again later
+/*
+Inputs:
+- client_hs: the clients part of the handshake
+- buf: storage to write `server_hs` into, must be at least 200 bytes long
+
+Returns:
+- server_hs: the servers part of the handshake
+- err: `Wet_Handshake` if `client_hs` is malformed, `Too_Short` if it's partial
+
+Lifetimes:
+- `server_hs` <= `buf`
+*/
+server_handshake_from_client_handshake :: proc(client_hs: string, buf: []byte) -> (server_hs: string, err: Error) {
+    assert(len(buf) > 200)
+    headers, _, _ := strings.partition(client_hs, "\r\n\r\n")
+    if len(headers) == len(client_hs) { // the request is incomplete (no \r\n\r\n), so try again later
         err = .Too_Short
         return
     }
@@ -237,7 +289,7 @@ parse_http_the_stupid_way :: proc(request: string, buf: []byte) -> (response: st
 
             accept := useless_transformation(key)
             assert(len(accept) == 28)
-            response = fmt.bprintf(buf,
+            server_hs = fmt.bprintf(buf,
 "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %v\r\n\r\n",
                 accept,
             )
@@ -259,9 +311,8 @@ parse_http_the_stupid_way :: proc(request: string, buf: []byte) -> (response: st
     }
 }
 
-default_handshake :: proc(gen := context.random_generator) -> string {
-    context.random_generator = gen
-
+@(private)
+client_handshake :: proc() -> string {
     request := "GET / HTTP/1.1\r\nUpgrade: WebSocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: i+Bin5OHtzB8biRq25i9EQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
 
     return request
