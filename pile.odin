@@ -1,4 +1,4 @@
-package websockets
+package websocket
 
 // the best data structure
 @(private)
