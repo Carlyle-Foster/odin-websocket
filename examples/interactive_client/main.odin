@@ -70,7 +70,7 @@ main :: proc() {
 
         // this buffer size is big enough to send it all in one "packet"
         transfer_buf: [4096 + ws.MAX_LENGTH_OF_HEADER]byte
-        packet1, packet2 := ws.create_frame(transfer_buf[:], .Text, input_buf[:n])
+        packet1, packet2 := ws.create_binary_frame(transfer_buf[:], input_buf[:n])
 
         assert(packet2 == nil)
 
@@ -83,12 +83,12 @@ main :: proc() {
             fmt.println("failed to read the servers response")
             continue
         }
-        response, _, decode_err := ws.decode_frame(transfer_buf[:n])
+        message, _, decode_err := ws.decode_frame(transfer_buf[:n])
         if decode_err != nil {
             fmt.println("ERROR:", decode_err)
             fmt.println("failed to parse the server's response")
             continue
         }
-        fmt.print("SERVER RESPONSE:  ", string(response.payload))
+        fmt.print("SERVER RESPONSE:  ", string(message))
     }
 }

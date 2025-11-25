@@ -1,6 +1,9 @@
 ols.json
 
+ssl
+selector
+
 # binaries
-echo_server
-interactive_client
-stress_tester
+/echo_server
+/interactive_client
+/stress_tester
