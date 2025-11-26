@@ -311,7 +311,6 @@ server_handshake_from_client_handshake :: proc(client_hs: string, buf: []byte) -
     }
 }
 
-@(private)
 client_handshake :: proc() -> string {
     request := "GET / HTTP/1.1\r\nUpgrade: WebSocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: i+Bin5OHtzB8biRq25i9EQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
 

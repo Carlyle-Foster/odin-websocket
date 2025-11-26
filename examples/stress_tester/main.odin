@@ -1,3 +1,8 @@
+/*
+WARNING: might be bad for your computer?
+
+i'm not too good at this stress-testing thing yet
+*/
 package stress
 
 import "core:log"

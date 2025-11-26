@@ -1,3 +1,7 @@
+/*
+open index.html in your browser to test this.
+you might need to refresh to connect.
+*/
 package echo
 
 import "core:net"
@@ -16,7 +20,7 @@ main :: proc() {
         bytes_read := net.recv_tcp(client, recv_buf[:]) or_continue
 
         handshake := string(recv_buf[:bytes_read])
-        response  := ws.parse_http_the_stupid_way(handshake, send_buf[:]) or_continue
+        response  := ws.server_handshake_from_client_handshake(handshake, send_buf[:]) or_continue
         net.send_tcp(client, transmute([]byte)response) or_continue
 
         echo_messages(client)

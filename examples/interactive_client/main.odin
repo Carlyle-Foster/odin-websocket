@@ -43,7 +43,7 @@ main :: proc() {
     }
     defer net.close(socket)
     
-    handshake := ws.default_handshake()
+    handshake := ws.client_handshake()
     net.send(socket, transmute([]byte)handshake)
     ignored_buf: [4096]byte
     _, _ = net.recv(socket, ignored_buf[:])
