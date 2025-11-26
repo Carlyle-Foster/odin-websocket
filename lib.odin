@@ -50,30 +50,30 @@ Close_Reason :: enum u16 {
 }
 
 /*
-Locates (and possibly unmasks) the `payload` within the websocket frame `data`.
+Locates (and possibly unmasks) the `payload` within the `frame`.
 
 Inputs:
-- data: a websocket frame
+- frame: a websocket frame
 
 Returns:
-- payload: a view of the mesage contained within `data`
+- payload: a view of the mesage contained within `frame`
 - bytes_parsed: the amount of bytes in the frame header + `len(payload)`
 - err:
     `Too_Short` if `data` is a partial frame, if it's `Closing` then `data` is a close
-    frame and you can call `get_close_reason` with `data` to get the reason and (possibly) a message.  
-    otherwise indicates that `data` is malformed
+    frame and you can call `get_close_reason` with `frame` to get the reason and (possibly) a message.  
+    otherwise indicates that `frame` is malformed
 
 Lifetimes:
 - `payload` <= `data`
 */
-decode_frame :: proc(data: []byte) -> (payload: []byte, bytes_parsed: int, err: Error) {
+decode_frame :: proc(frame: []byte) -> (payload: []byte, bytes_parsed: int, err: Error) {
     header_len := 2
-    if len(data) < header_len {
+    if len(frame) < header_len {
         err = .Too_Short
         return
     }
 
-    top_nibble := data[0] & 0xf0
+    top_nibble := frame[0] & 0xf0
     if top_nibble != 0x80 {
         if top_nibble & 0x70 > 0 {
             err = .Reserved_Bits_Used
@@ -83,18 +83,18 @@ decode_frame :: proc(data: []byte) -> (payload: []byte, bytes_parsed: int, err: 
         return
     }
 
-    opcode := Opcode(data[0] & 0x0f)
+    opcode := Opcode(frame[0] & 0x0f)
     if !reflect.enum_value_has_name(opcode) {
         err = .Opcode_Unsupported
         return
     }
 
-    masked := data[1] & 0x80 > 0
-    payload_len := int(data[1] & 0x7f)
+    masked := frame[1] & 0x80 > 0
+    payload_len := int(frame[1] & 0x7f)
     switch payload_len {
     case 0..=125: {}
     case 126:
-        len_16, len_ok := endian.get_u16(data[2:], .Big)
+        len_16, len_ok := endian.get_u16(frame[2:], .Big)
         if !len_ok {
             err = .Too_Short
             return
@@ -102,7 +102,7 @@ decode_frame :: proc(data: []byte) -> (payload: []byte, bytes_parsed: int, err: 
         payload_len = int(len_16)
         header_len += 2
     case 127: 
-        len_64, len_ok := endian.get_u64(data[2:], .Big)
+        len_64, len_ok := endian.get_u64(frame[2:], .Big)
         if !len_ok {
             err = .Too_Short
             return
@@ -115,7 +115,7 @@ decode_frame :: proc(data: []byte) -> (payload: []byte, bytes_parsed: int, err: 
     mask: u32
     if masked {
         mask_ok: bool
-        mask, mask_ok = endian.get_u32(data[header_len:], .Little)
+        mask, mask_ok = endian.get_u32(frame[header_len:], .Little)
         if !mask_ok {
             err = .Too_Short
             return
@@ -132,12 +132,12 @@ decode_frame :: proc(data: []byte) -> (payload: []byte, bytes_parsed: int, err: 
         }
     }
 
-    if len(data) < header_len + payload_len {
+    if len(frame) < header_len + payload_len {
         err = .Too_Short
         return
     }
 
-    payload = data[header_len:][:payload_len]
+    payload = frame[header_len:][:payload_len]
     if masked {
         for i in 0..<len(payload) {
             payload[i] ~= (transmute([4]byte)mask)[i % size_of(u32)]
@@ -150,17 +150,17 @@ decode_frame :: proc(data: []byte) -> (payload: []byte, bytes_parsed: int, err: 
 
 /*
 Inputs:
-- data: the same `data` used in a previous call to `decode_frame` that returned `.Closing`
+- frame: the same `frame` used in a previous call to `decode_frame` that returned `.Closing`
 
 Returns:
 - `Close_Reason`: the reason for closing, defaults to `.Normal` if no reason was given
-- `string`: a short text describing `Close_Reason`, defauls to `""` if no description was given
+- `string`: a short text describing `Close_Reason`, defaults to `""` if no description was given
 
 Lifetimes:
-- `string`  <= `data`
+- `string`  <= `frame`
 */
-get_close_reason :: proc(data: []byte) -> (Close_Reason, string) {
-    reason, close_message := get_close_reason(data)
+get_close_reason :: proc(frame: []byte) -> (Close_Reason, string) {
+    reason, close_message := get_close_reason(frame)
     return Close_Reason(reason), close_message
 }
 /*
@@ -169,12 +169,12 @@ Same as `getclose_close_reason` but it makes no assumptions about what the reaso
 The `Close_Reason` codes start at 1000 so you can easily use a custom error enum to
 signal errors in higher level binary protocols 
 */
-get_close_reason_custom :: proc(data: []byte) -> (u16, string) {
-    masked := data[1] & 0x80 > 0
+get_close_reason_custom :: proc(frame: []byte) -> (u16, string) {
+    masked := frame[1] & 0x80 > 0
     offset := 6 if masked else 2
-    code, code_ok := endian.get_u16(data[offset:], .Big)
+    code, code_ok := endian.get_u16(frame[offset:], .Big)
     if code_ok {
-        return code, string(data[offset:])
+        return code, string(frame[offset:])
     } else {
         return u16(Close_Reason.Normal), ""
     }
@@ -220,10 +220,10 @@ create_binary_frame :: proc(buf: []byte, payload: []byte, masked := false) -> (p
 }
 
 
-create_close_frame :: proc(buf: []byte, reason: Close_Reason, payload := "", masked := false) -> (packet: []byte) {
+create_close_frame :: proc(buf: []byte, reason: Close_Reason, payload := "", masked := false) -> (frame: []byte) {
     return create_close_frame_custom(buf, u16(reason), payload)
 }
-create_close_frame_custom :: proc(buf: []byte, reason: u16, payload := "", masked := false) -> (packet: []byte) {
+create_close_frame_custom :: proc(buf: []byte, reason: u16, payload := "", masked := false) -> (frame: []byte) {
     assert(len(buf) >= 127)
     assert(size_of(reason) + len(payload) <= 125)
     
@@ -244,7 +244,7 @@ create_close_frame_custom :: proc(buf: []byte, reason: u16, payload := "", maske
     pile_push(&header, code[:])
     
     pile_push(&header, transmute([]byte)payload)
-    packet = pile_as_slice(header)
+    frame = pile_as_slice(header)
     return
 }
 
