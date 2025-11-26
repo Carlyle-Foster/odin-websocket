@@ -58,12 +58,12 @@ Returns:
 - payload: a view of the mesage contained within `frame`
 - bytes_parsed: the amount of bytes in the frame header + `len(payload)`
 - err:
-    `Too_Short` if `data` is a partial frame, if it's `Closing` then `data` is a close
+    `Too_Short` if `frame` is incomplete, if it's `Closing` then `frame` is a close
     frame and you can call `get_close_reason` with `frame` to get the reason and (possibly) a message.  
-    otherwise indicates that `frame` is malformed
+    `err != .None` otherwise indicates that `frame` is malformed
 
 Lifetimes:
-- `payload` <= `data`
+- `payload` <= `frame`
 */
 decode_frame :: proc(frame: []byte) -> (payload: []byte, bytes_parsed: int, err: Error) {
     header_len := 2
