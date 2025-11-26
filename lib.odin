@@ -179,7 +179,7 @@ get_close_reason_custom :: proc(frame: []byte) -> (u16, string) {
     }
 }
 
-write_header :: proc(buf: []byte, payload: []byte) -> (header: []byte) {
+write_header :: proc(buf: []byte, payload: []byte) -> (bytes_writ: int) {
     assert(len(buf) >= MAX_LENGTH_OF_HEADER)
     
     pile := pile_create(buf)
@@ -203,7 +203,7 @@ write_header :: proc(buf: []byte, payload: []byte) -> (header: []byte) {
         pile_push(&pile, len[:])
     }
 
-    return pile_as_slice(pile)
+    return pile.len
 }
 
 

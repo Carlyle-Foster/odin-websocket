@@ -40,8 +40,7 @@ echo_messages :: proc(client: net.TCP_Socket) {
             }
             break
         }
-        header := ws.write_header(send_buf[:], payload)
-        message_length := len(header)
+        message_length := ws.write_header(send_buf[:], payload)
         message_length += copy(send_buf[message_length:], payload)
 
         net.send_tcp(client, send_buf[:message_length]) or_break
