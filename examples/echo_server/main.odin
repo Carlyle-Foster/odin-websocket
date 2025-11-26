@@ -1,5 +1,5 @@
 /*
-open index.html in your browser to test this.
+Open index.html in your browser to test this,
 you might need to refresh to connect.
 */
 package echo
@@ -35,13 +35,15 @@ echo_messages :: proc(client: net.TCP_Socket) {
         payload, _, ws_err := ws.decode_frame(recv_buf[:bytes_read])
         if ws_err != nil {
             if ws_err == .Closing {
-                packet := ws.create_close_frame(send_buf[:], .Normal)
-                net.send_tcp(client, packet)
+                close_frame := ws.write_close_frame(.Normal, send_buf[:])
+                net.send_tcp(client, close_frame)
             }
             break
         }
-        packet, _ := ws.create_binary_frame(send_buf[:], payload)
+        header := ws.write_header(send_buf[:], payload)
+        message_length := len(header)
+        message_length += copy(send_buf[message_length:], payload)
 
-        net.send_tcp(client, packet) or_break
+        net.send_tcp(client, send_buf[:message_length]) or_break
     }
 }

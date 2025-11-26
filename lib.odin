@@ -179,60 +179,53 @@ get_close_reason_custom :: proc(frame: []byte) -> (u16, string) {
     }
 }
 
-create_binary_frame :: proc(buf: []byte, payload: []byte) -> (packet_1: []byte, packet_2: Maybe([]byte)) {
+write_header :: proc(buf: []byte, payload: []byte) -> (header: []byte) {
     assert(len(buf) >= MAX_LENGTH_OF_HEADER)
     
-    header := pile_create(buf)
+    pile := pile_create(buf)
     final :: 1
     oc :: Opcode.Binary
-    pile_push(&header, u8(oc) | (final << 7))
+    pile_push(&pile, u8(oc) | (final << 7))
 
     mask_bit := u8(0)
     payload_len := len(payload)
     if payload_len < 126 {
-        pile_push(&header, u8(payload_len) | (mask_bit << 7))
+        pile_push(&pile, u8(payload_len) | (mask_bit << 7))
     } else if payload_len <= int(max(u16)) {
-        pile_push(&header, u8(126) | (mask_bit << 7))
+        pile_push(&pile, u8(126) | (mask_bit << 7))
 
         length := transmute([2]byte)u16be(payload_len)
-        pile_push(&header, length[:])
+        pile_push(&pile, length[:])
     } else {
-        pile_push(&header, 127 | (mask_bit << 7))
+        pile_push(&pile, 127 | (mask_bit << 7))
 
         len := transmute([8]byte)u64be(payload_len)
-        pile_push(&header, len[:])
+        pile_push(&pile, len[:])
     }
 
-    if payload_len <= len(buf) - header.len {
-        pile_push(&header, payload)
-        packet_1 = pile_as_slice(header)
-    } else {
-        packet_1 = pile_as_slice(header)
-        packet_2 = payload
-    }
-    return
+    return pile_as_slice(pile)
 }
 
 
-create_close_frame :: proc(buf: []byte, reason: Close_Reason, payload := "") -> (frame: []byte) {
-    return create_close_frame_custom(buf, u16(reason), payload)
+write_close_frame :: proc(reason: Close_Reason, buf: []byte, description := "") -> (frame: []byte) {
+    return write_close_frame_custom(u16(reason), buf, description)
 }
-create_close_frame_custom :: proc(buf: []byte, reason: u16, payload := "") -> (frame: []byte) {
+write_close_frame_custom :: proc(reason: u16, buf: []byte, description := "") -> (frame: []byte) {
     assert(len(buf) >= 127)
-    assert(size_of(reason) + len(payload) <= 125)
+    assert(size_of(reason) + len(description) <= 125)
     
     header := pile_create(buf)
     final :: 1
     pile_push(&header, u8(Opcode.Close) | (final << 7))
 
     mask_bit := u8(0)
-    payload_len := size_of(u16) + len(payload)
+    payload_len := size_of(u16) + len(description)
     pile_push(&header, u8(payload_len) | (mask_bit << 7))
 
     code := transmute([2]byte)u16be(reason)
     pile_push(&header, code[:])
     
-    pile_push(&header, transmute([]byte)payload)
+    pile_push(&header, transmute([]byte)description)
     frame = pile_as_slice(header)
     return
 }
