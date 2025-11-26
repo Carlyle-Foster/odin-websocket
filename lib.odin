@@ -3,7 +3,6 @@ package websocket
 import "core:fmt"
 import "core:strings"
 import "core:reflect"
-import "core:math/rand"
 import "core:encoding/endian"
 
 import "core:crypto/legacy/sha1"
@@ -180,7 +179,7 @@ get_close_reason_custom :: proc(frame: []byte) -> (u16, string) {
     }
 }
 
-create_binary_frame :: proc(buf: []byte, payload: []byte, masked := false) -> (packet_1: []byte, packet_2: Maybe([]byte)) {
+create_binary_frame :: proc(buf: []byte, payload: []byte) -> (packet_1: []byte, packet_2: Maybe([]byte)) {
     assert(len(buf) >= MAX_LENGTH_OF_HEADER)
     
     header := pile_create(buf)
@@ -188,7 +187,7 @@ create_binary_frame :: proc(buf: []byte, payload: []byte, masked := false) -> (p
     oc :: Opcode.Binary
     pile_push(&header, u8(oc) | (final << 7))
 
-    mask_bit := u8(masked)
+    mask_bit := u8(0)
     payload_len := len(payload)
     if payload_len < 126 {
         pile_push(&header, u8(payload_len) | (mask_bit << 7))
@@ -204,11 +203,6 @@ create_binary_frame :: proc(buf: []byte, payload: []byte, masked := false) -> (p
         pile_push(&header, len[:])
     }
 
-    if masked {
-        mask := get_mask()
-        pile_push(&header, mask[:])
-    }
-
     if payload_len <= len(buf) - header.len {
         pile_push(&header, payload)
         packet_1 = pile_as_slice(header)
@@ -220,10 +214,10 @@ create_binary_frame :: proc(buf: []byte, payload: []byte, masked := false) -> (p
 }
 
 
-create_close_frame :: proc(buf: []byte, reason: Close_Reason, payload := "", masked := false) -> (frame: []byte) {
+create_close_frame :: proc(buf: []byte, reason: Close_Reason, payload := "") -> (frame: []byte) {
     return create_close_frame_custom(buf, u16(reason), payload)
 }
-create_close_frame_custom :: proc(buf: []byte, reason: u16, payload := "", masked := false) -> (frame: []byte) {
+create_close_frame_custom :: proc(buf: []byte, reason: u16, payload := "") -> (frame: []byte) {
     assert(len(buf) >= 127)
     assert(size_of(reason) + len(payload) <= 125)
     
@@ -231,14 +225,9 @@ create_close_frame_custom :: proc(buf: []byte, reason: u16, payload := "", maske
     final :: 1
     pile_push(&header, u8(Opcode.Close) | (final << 7))
 
-    mask_bit := u8(masked)
+    mask_bit := u8(0)
     payload_len := size_of(u16) + len(payload)
     pile_push(&header, u8(payload_len) | (mask_bit << 7))
-
-    if masked {
-        mask := get_mask()
-        pile_push(&header, mask[:])
-    }
 
     code := transmute([2]byte)u16be(reason)
     pile_push(&header, code[:])
@@ -246,15 +235,6 @@ create_close_frame_custom :: proc(buf: []byte, reason: u16, payload := "", maske
     pile_push(&header, transmute([]byte)payload)
     frame = pile_as_slice(header)
     return
-}
-
-@(private)
-get_mask :: proc() -> [4]byte {
-    when ODIN_DEBUG {
-        return {0xff, 0xff, 0xff, 0xff}
-    } else {
-        return transmute([4]byte)u32be(rand.uint32())
-    }
 }
 
 /*
@@ -309,10 +289,4 @@ server_handshake_from_client_handshake :: proc(client_hs: string, buf: []byte) -
 
         return
     }
-}
-
-client_handshake :: proc() -> string {
-    request := "GET / HTTP/1.1\r\nUpgrade: WebSocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: i+Bin5OHtzB8biRq25i9EQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
-
-    return request
 }
