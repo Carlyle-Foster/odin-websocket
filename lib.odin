@@ -27,11 +27,13 @@ Opcode :: enum u8 {
 
 Error :: enum {
     None = 0,
+    Missing_key,
     Too_Short,
     Reserved_Bits_Used,
     Fragmentation_Unsupported,
     Opcode_Unsupported,
     Wet_Handshake,
+    Payload_Too_Long,
     Closing,
 }
 
@@ -106,11 +108,16 @@ decode_frame :: proc(frame: []byte) -> (payload: []byte, bytes_parsed: int, err:
             err = .Too_Short
             return
         }
+        if len_64 > u64(max(int)) {
+            err = .Payload_Too_Long
+            return
+        }
         payload_len = int(len_64)
         header_len += 8
     case:
         unreachable()
     }
+
     mask: u32
     if masked {
         mask_ok: bool
@@ -169,15 +176,25 @@ The `Close_Reason` codes start at 1000 so you can easily use a custom error enum
 signal errors in higher level binary protocols 
 */
 get_close_reason_custom :: proc(frame: []byte) -> (u16, string) {
+    offset := 2
+    switch frame[1] & 0x7f {
+    case 0..=125: offset += 0
+    case     126: offset += 2
+    case     127: offset += 8
+    case: unreachable()
+    }
     masked := frame[1] & 0x80 > 0
-    // TODO: a close frame could have a longer length encoding, i think
-    offset := 6 if masked else 2
+    if masked {
+        offset += 4
+    }
+
+    reason := u16(Close_Reason.Normal)
     code, code_ok := endian.get_u16(frame[offset:], .Big)
     if code_ok {
-        return code, string(frame[offset:])
-    } else {
-        return u16(Close_Reason.Normal), ""
+        reason = code
+        offset += 2
     }
+    return reason, string(frame[offset:])
 }
 
 write_header :: proc(buf: []byte, payload: []byte) -> (bytes_writ: int) {
@@ -245,6 +262,8 @@ Lifetimes:
 */
 server_handshake_from_client_handshake :: proc(client_hs: string, buf: []byte) -> (server_hs: string, err: Error) {
     assert(len(buf) > 200)
+
+    err = .Missing_key
     headers, _, _ := strings.partition(client_hs, "\r\n\r\n")
     if len(headers) == len(client_hs) { // the request is incomplete (no \r\n\r\n), so try again later
         err = .Too_Short
@@ -270,17 +289,17 @@ server_handshake_from_client_handshake :: proc(client_hs: string, buf: []byte) -
         }
     }
     return
+}
 
-    useless_transformation :: proc(key: string) -> (accept: string) {
-        sha1_ctx: sha1.Context
-        hash: [sha1.DIGEST_SIZE]byte
+useless_transformation :: proc(key: string) -> (accept: string) {
+    sha1_ctx: sha1.Context
+    hash: [sha1.DIGEST_SIZE]byte
 
-        sha1.init(&sha1_ctx)
-        sha1.update(&sha1_ctx, transmute([]byte)key)
-        sha1.update(&sha1_ctx, transmute([]byte)string("258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
-        sha1.final(&sha1_ctx, hash[:])
-        accept = base64.encode(hash[:], allocator=context.temp_allocator)
+    sha1.init(&sha1_ctx)
+    sha1.update(&sha1_ctx, transmute([]byte)key)
+    sha1.update(&sha1_ctx, transmute([]byte)string("258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+    sha1.final(&sha1_ctx, hash[:])
+    accept = base64.encode(hash[:], allocator=context.temp_allocator)
 
-        return
-    }
+    return
 }
