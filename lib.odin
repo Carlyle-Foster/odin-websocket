@@ -159,7 +159,7 @@ Lifetimes:
 - `string`  <= `frame`
 */
 get_close_reason :: proc(frame: []byte) -> (Close_Reason, string) {
-    reason, close_message := get_close_reason(frame)
+    reason, close_message := get_close_reason_custom(frame)
     return Close_Reason(reason), close_message
 }
 /*
