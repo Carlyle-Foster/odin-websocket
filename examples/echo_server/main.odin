@@ -4,12 +4,13 @@ you might need to refresh to connect.
 */
 package echo
 
+import "core:fmt"
 import "core:net"
 
 import ws "../../../odin-websockets"
 
-send_buf: [4*1024]byte
-recv_buf: [4*1024]byte
+send_buf: [4*1024*1024]byte
+recv_buf: [4*1024*1024]byte
 
 main :: proc() {
     server, listen_err := net.listen_tcp({ net.IP4_Loopback, 8783 })
@@ -30,16 +31,25 @@ main :: proc() {
 }
 
 echo_messages :: proc(client: net.TCP_Socket) {
+    bytes_read := 0
     for {
-        bytes_read := net.recv_tcp(client, recv_buf[:]) or_break
+        n := net.recv_tcp(client, recv_buf[bytes_read:]) or_break
+        if n == 0 {
+            break // they disconnected
+        }
+        bytes_read += n
         payload, _, ws_err := ws.decode_frame(recv_buf[:bytes_read])
         if ws_err != nil {
-            if ws_err == .Closing {
+            if ws_err == .Closing || bytes_read == 0 {
                 close_frame := ws.write_close_frame(.Normal, send_buf[:])
                 net.send_tcp(client, close_frame)
+            } else if ws_err == .Too_Short {
+                continue
             }
+            fmt.println(ws_err, bytes_read)
             break
         }
+        bytes_read = 0
         message_length := ws.write_header(send_buf[:], payload)
         message_length += copy(send_buf[message_length:], payload)
 
