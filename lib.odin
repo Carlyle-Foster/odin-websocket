@@ -14,7 +14,7 @@ import "core:encoding/base64"
 MAX_LENGTH_OF_HEADER :: 14
 
 /*
-Any opcode outside of this subset is supported
+Any opcode outside of this subset is unsupported
 */
 Opcode :: enum u8 {
     // Continuation = 0x0,
