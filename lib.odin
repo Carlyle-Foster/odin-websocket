@@ -123,9 +123,9 @@ decode_frame :: proc(frame: []byte) -> (payload: []byte, bytes_parsed: int, err:
     }
 
     if opcode == .Close {
+        err = .Closing
+        
         if payload_len >= size_of(Close_Reason) {
-            err = .Closing
-
             header_len  += size_of(Close_Reason)
             payload_len -= size_of(Close_Reason)
         }
@@ -170,6 +170,7 @@ signal errors in higher level binary protocols
 */
 get_close_reason_custom :: proc(frame: []byte) -> (u16, string) {
     masked := frame[1] & 0x80 > 0
+    // TODO: a close frame could have a longer length encoding, i think
     offset := 6 if masked else 2
     code, code_ok := endian.get_u16(frame[offset:], .Big)
     if code_ok {
